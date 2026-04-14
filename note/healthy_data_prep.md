@@ -120,26 +120,72 @@ All files are in engineering units (degrees) regardless of filename.
 
 ---
 
-## 4. EEG–Goniometer Alignment (Healthy)
+## 4. EEG--Goniometer Alignment (Healthy)
 
-### Strategy: IOI Pattern Matching
+### Shared Principle
 
-Unlike patient data (which has periodic S10 sync pulses), healthy data uses **Inter-Onset-Interval (IOI) substring matching**:
+The experiment PC sends the same TTL trigger to both EEG amplifier and goniometer DataLITE simultaneously. EEG records them as `S 1`, `S 2`, ... `S 12` markers; goniometer records them as rising edges in its embedded Stim channel (bit-coded values: 0, 2, 6, 8, 10, 14, 16). A standard session has 302 triggers on each side.
 
-1. The experiment PC sends TTL triggers to **both** EEG amplifier and goniometer system simultaneously
-2. Goniometer records triggers in its embedded **Stim channel** (values: 0, 2, 6, 8, 10, 14, 16 — bit-coded)
-3. Total goni stim onsets = total EEG stimulus markers (302 for typical session) → 1:1 correspondence
-4. Cross-correlate IOI sequences of goni stim onsets vs EEG marker positions
-5. Yields single time offset (typically ~70s, because goni recording starts before EEG experiment)
+Alignment = find a single scalar offset such that `goni_time = eeg_time + offset`. The EEG clock is the grand clock; all trial timestamps are expressed in EEG time.
 
-### Alignment Quality
+### Algorithm: `align_ioi.m`
 
-- Residuals < 50ms verified across all 13 healthy sessions
-- Example: SUB_02 Sess01 — mean residual = 0.012s, max = 0.052s
+Healthy data has no periodic S10 sync pulses (unlike patient data), so alignment uses IOI (Inter-Onset-Interval) substring matching:
 
-### SUB_01 Sess01 Special Case
+1. **Stim edge extraction**: threshold goni Stim > 5, merge pulses within 5ms, filter spurious onsets (IOI < 50ms)
+2. **Direct 1:1 attempt** (if counts match): compute per-event offset, accept if all residuals < 100ms
+3. **IOI sliding match** (if direct fails or counts differ): extract IOI subsequences from 5 starting positions (5%, 20%, 40%, 60%, 80%), slide each against the goni IOI sequence, pick the candidate with highest match rate
+4. **Hough fallback** (if match < 90%): build a histogram of all pairwise EEG-to-goni offsets, find the dominant peak, refine via median of nearby matches
+5. **Output**: `offset` (scalar), `align_info` struct with method, match_frac, residuals
 
-This session uses the old experiment script with 303 EEG markers vs 303 goni onsets. Direct 1:1 mapping gave 192s residual. Solution: IOI substring sliding alignment (positional mapping via IEI pattern matching). Result: 302/303 matched with correct offset.
+### Count Mismatch Handling: `align_eeg_goni.m` / `check_iei()`
+
+When EEG and goni trigger counts differ by N:
+
+1. Identify which side is longer
+2. Iteratively try removing each event from the longer side; pick the removal that minimizes max IEI difference vs the shorter side
+3. Accept removal if residual < 3000ms; repeat until counts match
+4. Log each removal with timestamp and residual
+
+Examples: SUB_01_sess01 (303 vs 303, old script, resolved by IOI sliding), Sub02_Sess03 patient (145 vs 144, 1 spurious goni stim at recording end removed).
+
+### Alignment Quality (37 sessions)
+
+| Category | Sessions | Match | Max residual |
+|----------|----------|-------|-------------|
+| Perfect | 35/37 | 100% | < 50ms |
+| Clock drift (per-segment offset) | SUB_07_sess02, SUB_27_sess01 | 100% after fix | < 31ms |
+
+### Clock Drift Special Cases
+
+Two sessions have gradual clock drift between EEG and goni systems. Joint angle data is fully continuous (no disconnection, no zeros). The standard single offset fails because cumulative drift exceeds the 100ms tolerance.
+
+**Fix**: `extract_goni_all_healthy.m` applies per-segment offsets for these sessions via `get_special_offsets()`. Each trial's EEG time determines which offset to use.
+
+#### SUB_07_sess02
+
+Drift of +0.244s over 28 minutes. Two offset segments:
+
+| EEG time range | Offset (s) |
+|---------------|------------|
+| < 1700s | -28.085 |
+| >= 1700s | -27.841 |
+
+#### SUB_27_sess01
+
+Initial clock mismatch of 2.4s that resolves after ~260s, plus late drift of +0.257s. Three offset segments:
+
+| EEG time range | Offset (s) | Note |
+|---------------|------------|------|
+| < 260s | -11.840 | Initial mismatch |
+| 260--1695s | -9.424 | Primary |
+| >= 1695s | -9.167 | Late drift |
+
+See `align_special_cases.md` for full diagnostic details.
+
+### Validation
+
+Per-session trigger correspondence tables are saved to `result/goni_healthy/qc/align_qc_*.txt`. Each row shows: trigger index, EEG time, error (ms), match status.
 
 ---
 
@@ -263,6 +309,32 @@ task_id, task_name, marker_start, marker_end, t_start_unix_ms, t_end_unix_ms, du
 
 Walk condition has high trial-level variability (CV 0.15–0.80) because Walker slows/stops during turns. Worst: SUB_01_sess01 walk has 29/90 flat trials. Imagine condition is stable (CV 0.02–0.04).
 
+### EEG Bad Channel Outliers (V8 Pipeline)
+
+| Session | Bad Ch | Channels | Notes |
+|---------|--------|----------|-------|
+| **SUB_26 sess01** | **11** | Fp1,Fz,Cz,F4,Fp2,AF7,AF3,AFz,AF8,AF4,F2 | Entire frontal strip bad; processed with warning |
+| **SUB_21 sess01** | **10** | FC5,T7,Pz,T8,F4,Fp2,FT7,C5,PO7,TP8 | At limit; also has goni issues |
+| SUB_19 sess01 | 7 | FC5,FC1,P7,P8,C4,F4,F8 | |
+| SUB_08 sess01 | 6 | F3,T7,T8,AF3,F5,FT7 | Temporal channels |
+| SUB_17 sess01 | 5 | Fz,F3,F4,Fp2,F5 | Frontal channels |
+| SUB_01 sess01 | 5 | T7,O2,T8,C5,PO8 | Temporal-occipital |
+
+**Most common bad channel**: Fp2 (20/30 sessions) — typical frontal electrode contact issue.
+
+### ICLabel Brain IC Outliers
+
+QC threshold: brain>70% ≥2, brain>80% ≥2, brain>90% ≥1
+
+| Session | >70% | >80% | >90% | Notes |
+|---------|------|------|------|-------|
+| **SUB_07 sess01** | 4 | 4 | **1** | >90% borderline |
+| **SUB_07 sess02** | 5 | 4 | **1** | >90% borderline |
+| **SUB_11 sess01** | **2** | **2** | **1** | All thresholds at minimum |
+| **SUB_19 sess01** | **2** | **2** | **2** | All thresholds at minimum; also 7 bad ch |
+
+All sessions pass QC criteria, but SUB_07/11/19 are borderline — flag for extra scrutiny in downstream analysis.
+
 ### Other Exceptions
 
 | Session | Issue |
@@ -272,4 +344,4 @@ Walk condition has high trial-level variability (CV 0.15–0.80) because Walker 
 
 ---
 
-> **EEG preprocessing pipeline, bugs & lessons, goni channel index bug** → see `preprocessing_lessons.md`
+> **EEG preprocessing pipeline V8, bugs & lessons, goni channel index bug** → see `preprocessing_lessons.md`

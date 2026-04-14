@@ -1,0 +1,18 @@
+# Data outputs (too large for git)
+result/
+*.mat
+*.log
+
+# Work logs (tracked in main repo)
+work_log/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# MATLAB temp
+*.asv
+*.m~
+
+# Archive old runs
+_archive/

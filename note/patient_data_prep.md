@@ -38,7 +38,7 @@ S10 → S11 → [S4→S5]×5 → [S1→S2]×N → [S7→S8] → [S1→S2]×N →
 |-----------|-------|
 | Amplifier | actiCHamp Plus (Brain Products) |
 | Channels | 63 (10-20 extended montage) |
-| Online reference | **Cz** (differs from healthy FCz) |
+| Online reference | **FCz** (same as healthy; vhdr labels it "REF" but Phys.Ch.64 = FCz position, Cz recorded as normal Ch24) |
 | Ground | AFz |
 | Sampling rate | 1000 Hz |
 | Format | BrainVision (.vhdr / .vmrk / .eeg) |
@@ -93,40 +93,66 @@ Sessions with bad REF (Cz): **Sub01_Sess03** (abandoned), **Sub01_Sess04**, **Su
 
 ---
 
-## 4. EEG–Goniometer Alignment (Patient)
+## 4. EEG--Goniometer Alignment (Patient)
+
+### Shared Principle
+
+Same as healthy: experiment PC sends simultaneous TTL triggers to both systems. EEG clock is the grand clock. Output: `goni_time = eeg_time + offset`.
 
 ### Strategy: S10/Stim Periodic Trigger Matching
 
-Patient data has **periodic S10 sync pulses** (~83–144 per session), providing dense alignment anchor grid.
+Patient data has **periodic S10 sync pulses** (~83--144 per session), providing a much denser alignment grid than healthy data (which relies on experiment markers only).
 
-#### Algorithm (`align_eeg_goni.m`)
+### Algorithm (`align_eeg_goni.m`)
 
-1. **Extract goni Stim edges:** threshold > 5V, merge pulses within 5ms
-2. **Simple alignment:** anchor first S10 = first Stim rising edge, compute offset
-3. **Validate:** check inter-event intervals (IEI) between matched pairs, 100ms tolerance
-4. **Fallback** (if simple fails): brute-force search — try each S10 as anchor, accept >80% IEI match
-5. **Output:** `offset_sec` such that `goni_time = eeg_time + offset`
+1. **Stim edge extraction**: threshold goni Stim > 5V, merge pulses within 5ms
+2. **IEI consistency check** (`check_iei`): compare EEG S10 and goni Stim counts
+   - Equal: validate sorted IEI distributions match (warn if max diff > 500ms, error if > 3000ms)
+   - Differ by N: iteratively remove spurious events from the longer side (find which removal minimizes max IEI difference; accept if residual < 3000ms)
+3. **Simple alignment**: anchor first S10 = first Stim rising edge, accept if > 80% matched within 100ms
+4. **Brute-force fallback**: try each S10 as anchor, pick best match rate
+5. **Post-alignment IEI validation**: for consecutive matched pairs, verify EEG gap matches goni gap
+6. **Output**: `offset` (scalar), `match_info` struct, trigger correspondence table
 
-#### Post-Alignment Validation
+### Count Mismatch Examples
 
-- Trigger correspondence table: `qc/align/trigger_table_*.txt`
-- 4-panel QC plot: `qc/QC_align_*.png`
-- Maximum timing error across all sessions: **43ms**
+| Session | EEG S10 | Goni Stim | Mismatch | Resolution |
+|---------|---------|-----------|----------|------------|
+| Sub01_Sess04 (F1) | 83 | 82 | EEG has 1 extra | Goni gap 335--775s lost 1 stim; removed corresponding S10 via IEI pattern |
+| Sub02_Sess03 | 144 | 145 | Goni has 1 extra | 1 spurious stim pulse at goni recording end; removed via IEI pattern |
 
-### Alignment Quality Per Session
+### Multi-File Goni Sessions
+
+| Session | Situation | Handling |
+|---------|-----------|----------|
+| Sub01_Sess03 | Goni restarted mid-session -> 2 files (59 + 44 stim onsets vs 103 S10) | Each goni file aligned independently to its matching S10 subset |
+| Sub01_Sess01 | 6 EEG files, 1 goni file | EEG files merged first, then single alignment |
+| Sub01_Sess02 | 3 EEG files, 1 goni file | EEG files merged first, then single alignment |
+| Sub01_Sess04 | 2 EEG files, 1 goni file (with gap) | Aligned per-file; F1 has 82/83 match, F2 has 83/83 |
+
+### Alignment Quality (All 10 Patient Sessions)
+
+All sessions 100% matched. No clock drift issues (shorter sessions than healthy, ~20--45 min vs ~57 min).
 
 | Session | S10 | Stim | Matched | Max err | Notes |
 |---------|-----|------|---------|---------|-------|
-| Sub01_Sess01 (×6 files) | 83 | 83 | 83 | 43ms | 100% |
-| Sub01_Sess02 (×3 files) | 83 | 83 | 83 | 43ms | 100% |
-| Sub01_Sess03 (Goni1) | 103 | 59 | 59 | — | Goni restarted mid-session |
-| Sub01_Sess03 (Goni2) | 103 | 44 | 44 | — | Second goni file |
-| Sub01_Sess04 (F1) | 83 | 82 | 82 | — | Goni gap 335–775s, 1 stim lost |
-| Sub01_Sess04 (F2) | 83 | 83 | 83 | 41ms | 100% |
-| Sub01_Sess05 | 83 | 83 | 83 | 41ms | 100% |
-| Sub02_Sess01 | 144 | 144 | 144 | 41ms | 100% |
-| Sub02_Sess02 | 144 | 144 | 144 | 41ms | 100% |
-| Sub02_Sess03 | 144 | 145 | 144 | — | 1 spurious stim at goni end |
+| Sub01_Sess01 (x6 files) | 83 | 83 | 83 | 43ms | |
+| Sub01_Sess02 (x3 files) | 83 | 83 | 83 | 43ms | |
+| Sub01_Sess03 (Goni1) | 103 | 59 | 59 | -- | Goni restarted mid-session |
+| Sub01_Sess03 (Goni2) | 103 | 44 | 44 | -- | Second goni file |
+| Sub01_Sess04 (F1) | 83 | 82 | 82 | -- | Goni gap 335--775s, 1 stim lost |
+| Sub01_Sess04 (F2) | 83 | 83 | 83 | 41ms | |
+| Sub01_Sess05 | 83 | 83 | 83 | 41ms | |
+| Sub02_Sess01 | 144 | 144 | 144 | 41ms | |
+| Sub02_Sess02 | 144 | 144 | 144 | 41ms | |
+| Sub02_Sess03 | 144 | 145 | 144 | -- | 1 spurious stim removed |
+| Sub02_Sess04 | 161 | 161 | 161 | 22ms | 100%; 47 MI + 50 S2S extracted |
+
+### Validation
+
+- Trigger correspondence tables: `qc/align/trigger_table_*.txt`
+- 4-panel QC plots: `qc/QC_align_*.png`
+- Maximum timing error across all patient sessions: **43ms**
 
 ### 2-Min Walk (S7/S8) Availability
 
@@ -264,6 +290,20 @@ No goniometer alignment needed.
 | Sess01 | Sub02 | 05 Jan 2026 | 1 | ~29 | OFF | Bad REF |
 | Sess02 | Sub02 | 29 Jan 2026 | 1 | ~39 | ON | Bad REF |
 | Sess03 | Sub02 | 02 Mar 2026 | 1 | ~44 | ON | No S12; 1 spurious goni stim |
+| Sess04 | Sub02 | 06 Apr 2026 | 1 | — | ON (stronger) | 33/59 bad ch at corr=0.8; goni data present but not yet extracted |
+
+### Excluded from Analysis
+
+The following sessions are **excluded from all downstream analysis** due to bad REF electrode (Cz impedance > 20kOhm):
+
+- **P01_Sess03**: Bad REF, abandoned during recording, fatigued subject
+- **P01_Sess04**: Bad REF, goni disconnections
+- **P02_Sess01**: Bad REF
+- **P02_Sess02**: Bad REF
+
+V8 pipeline ran step1-2 only (no ICA transfer / ICLabel). These sessions retain step1/step2 files for archival but are not used in CCA, decoding, or any reported results.
+
+**Usable patient sessions**: P01_Sess01, P01_Sess02, P01_Sess05, P02_Sess03, P02_Sess04
 
 ---
 

@@ -68,13 +68,15 @@ for s = 1:length(sessions)
         eeg_field  = cond_map{c, 1};
         goni_type  = cond_map{c, 2};
 
-        % Get EEG epochs
+        % Get EEG epochs + trial info (absolute timestamps in EEG clock)
         if ~isfield(E.epochs, eeg_field)
             paired.(lower(eeg_field)) = empty_condition();
             continue;
         end
         eeg_trials = E.epochs.(eeg_field);
         n_eeg = length(eeg_trials);
+        info_field = [eeg_field '_info'];
+        has_info = isfield(E.epochs, info_field) && length(E.epochs.(info_field)) == n_eeg;
 
         % Get goni trials
         goni_mask = strcmp({G.trials.type}, goni_type);
@@ -111,6 +113,10 @@ for s = 1:length(sessions)
         goni_epochs = cell(n_eeg, 1);
         trial_dur   = zeros(n_eeg, 1);
 
+        % Trial table: absolute timestamps in EEG clock (seconds from recording start)
+        tt = struct('trial', {}, 'start_sec', {}, 'end_sec', {}, 'dur_sec', {}, ...
+                    'goni_start_sec', {}, 'goni_end_sec', {});
+
         for t = 1:n_eeg
             eeg_seg = double(eeg_trials{t});  % [59 × T_eeg]
 
@@ -127,12 +133,32 @@ for s = 1:length(sessions)
             eeg_epochs{t}  = eeg_seg;
             goni_epochs{t} = goni_rs;
             trial_dur(t)   = T / target_srate;
+
+            % Build trial table row
+            row.trial = t;
+            row.dur_sec = T / target_srate;
+            if has_info
+                row.start_sec = E.epochs.(info_field)(t).start_lat / eeg_srate;
+                row.end_sec   = E.epochs.(info_field)(t).end_lat   / eeg_srate;
+            else
+                row.start_sec = NaN;
+                row.end_sec   = NaN;
+            end
+            if isfield(goni_trials, 'start_eeg_sec')
+                row.goni_start_sec = goni_trials(t).start_eeg_sec;
+                row.goni_end_sec   = goni_trials(t).end_eeg_sec;
+            else
+                row.goni_start_sec = NaN;
+                row.goni_end_sec   = NaN;
+            end
+            tt(end+1) = row; %#ok<AGROW>
         end
 
         cond_out = struct();
         cond_out.eeg_epochs  = eeg_epochs;
         cond_out.goni_epochs = goni_epochs;
         cond_out.trial_dur   = trial_dur;
+        cond_out.trial_table = tt;
         cond_out.n_trials    = n_eeg;
 
         paired.(lower(eeg_field)) = cond_out;
@@ -198,5 +224,7 @@ function c = empty_condition()
     c.eeg_epochs  = {};
     c.goni_epochs = {};
     c.trial_dur   = [];
+    c.trial_table = struct('trial', {}, 'start_sec', {}, 'end_sec', {}, ...
+                           'dur_sec', {}, 'goni_start_sec', {}, 'goni_end_sec', {});
     c.n_trials    = 0;
 end

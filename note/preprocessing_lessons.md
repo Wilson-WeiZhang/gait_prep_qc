@@ -1,21 +1,56 @@
-# EEG Preprocessing Lessons & Pipeline V7
+# EEG Preprocessing Lessons & Pipeline V8
 
 Shared lessons from processing both healthy (A2Walk) and patient (RESTORE2) data. For population-specific details see `healthy_data_prep.md` and `patient_data_prep.md`.
 
 ---
 
-## 1. Pipeline V7 (Current)
+## 1. Pipeline V8 (Current — frozen 2026-04-10)
+
+### Data Flow
 
 ```
-Step1a: Load → 59ch whitelist → resample 250Hz → BP 1-40Hz → trim → step1_ica.set
-Step1b: Same but BP 0.1-40Hz → step1.set
-Step2:  Extract segments → clean_rawdata(ch, corr=0.8) → interp → CAR →
-        BL correction → ASR(k=20, movement only) → AMICA(1 model, 1000 iter) → step2.set
-Step3:  Transfer ICA to 0.1Hz → interp+CAR → ICLabel → artifact>0.9 rejection → step3.set
-Step4:  Epoch → epochs.mat
+Raw → 59ch whitelist → Resample 250Hz
+  ├─ 1-40 Hz BP (step1_ica.set, 59ch) ─── for ICA training
+  │   └─ Trim S11–S12 → Extract task segments (no BL correction)
+  │       → clean_rawdata (corr=0.8, bad ch detection)
+  │       → Spherical spline interpolation → Reorder 59ch
+  │       → +FCz zero-filled → CAR (60ch) → ASR (k=20, Walk only)
+  │       → AMICA (1 model, 1000 iter) → step2.set (60ch)
+  │
+  └─ 0.1-40 Hz BP (step1.set, 59ch) ─── for final output
+      └─ Same bad ch interp → Reorder 59ch
+          → +FCz zero-filled → CAR (60ch) → ASR (k=20, Walk only)
+          → ICA weight transfer from step2
+          → ICLabel → Reject artifact > 0.8
+          → step3.set (60ch, continuous, ICA-cleaned)
 ```
 
-Key V7 changes from V6: dual high-pass, avgref after bad ch interp, bad ch detection before baseline correction.
+### Key Design Decisions
+
+| Decision | V8 | Rationale |
+|----------|-----|-----------|
+| Dual high-pass | 1 Hz (ICA) / 0.1 Hz (output) | Klug & Gramann 2021; preserves delta/SCP for decoding |
+| ICA training: no BL correction | Yes | BL correction distorts inter-channel correlation; ICA assumes stationarity |
+| FCz restoration | Zero-filled before CAR | FCz is online ref (actiCHamp); restoring avoids rank loss (Makoto/Kim 2023) |
+| 60ch output | 59 brain + FCz | FCz becomes valid after CAR; located at fronto-central midline (SMA/pre-SMA) |
+| ASR on 0.1 Hz path | Yes, Walk only | Removes non-stationary bursts that ICA cannot separate; both paths cleaned |
+| AMICA 1 model | 1 model, 1000 iter | BeMoBIL standard; 2 models unnecessary when ASR pre-cleans movement data |
+| ICLabel threshold | artifact > 0.8 | More aggressive than 0.9; appropriate for MoBI data |
+| ICA weights preserved | In `step3_meta.icaweights_pre_reject` | Enables post-hoc source analysis |
+
+### V6 → V8 Changes Summary
+
+| Parameter | V6 | V8 |
+|-----------|-----|-----|
+| Output HP | 0.5 Hz | 0.1 Hz |
+| ICA HP | same as output | separate 1 Hz copy |
+| AMICA | 2 models | 1 model |
+| BL for ICA training | Yes (1s pre-trial) | No |
+| FCz | Excluded | Restored as 60th channel |
+| CAR timing | After IC rejection (Step2b) | After interp, before ASR (Step2) |
+| IC rejection | artifact>0.9 ∥ brain<0.05 | artifact>0.8 only |
+| ASR on output | No | Yes (Walk segments) |
+| ICA weights | Cleared | Preserved in metadata |
 
 ---
 
@@ -31,9 +66,10 @@ Key V7 changes from V6: dual high-pass, avgref after bad ch interp, bad ch detec
 
 ## 3. IC Rejection Criteria
 
-- **Final rule: artifact > 0.9 only** (Muscle/Eye/Heart/LineNoise/ChanNoise any > 0.9)
+- **V8 rule: artifact > 0.8** (Muscle/Eye/Heart/LineNoise/ChanNoise any > 0.8)
 - "Other" category does NOT trigger rejection
 - brain < 0.1 rule abandoned — too aggressive, removed valid brain components
+- **QC threshold**: brain>70% ≥2, brain>80% ≥2, brain>90% ≥1 per session
 
 ---
 
@@ -45,13 +81,13 @@ Applying baseline correction **before** `clean_rawdata` destroys inter-channel s
 
 - P02_Sess04: went from 33 flagged bad channels to fewer after fixing order
 - **Rule:** bad channel detection on un-corrected data, baseline correction afterward
+- **V8:** ICA training segments extracted with NO baseline correction at all
 
 ### AMICA Rank Calculation
 
 - `pop_reref([], [])` for avgref reduces rank by 1
-- Wrong: `data_rank = n_brain - n_interp`
-- Correct: `data_rank = n_brain - n_interp - 1`
-- All V7 outputs required rerun after this fix
+- **V8 fix:** Restore FCz as zero-filled channel before CAR → rank loss absorbed
+- Formula: `data_rank = n_brain - n_interp` (no -1 with FCz restoration)
 
 ### Step3 Interpolation Silent Skip
 
@@ -63,14 +99,20 @@ Applying baseline correction **before** `clean_rawdata` destroys inter-channel s
 - `pop_select` on trial segments sometimes lost channel location info → ICLabel failure in Step3
 - Fix: restore `chanlocs`/`chaninfo` after `pop_select` and after `pop_runamica`
 
+### ASR Segment Selection Consistency
+
+- `apply_asr` must check boundary crossings and nested start markers (same logic as `extract_segments` and `extract_epochs`)
+- V8 fix: added boundary check + nested marker check + dur>300s limit + warning if no segments found
+
 ---
 
 ## 5. clean_rawdata Thresholds
 
 - BeMoBIL (Klug 2022): **corr 0.75 (lax) to 0.85 (strict)**
 - 0.8 = field default (Jacobsen 2021, most gait EEG studies)
-- Pipeline V7: upper limit = 10/59 bad channels; error-exit if exceeded
+- Pipeline V8: upper limit = 10/59 bad channels; error-exit if exceeded
 - **P02_Sess04 anomaly**: corr=0.8 → 33 bad (root cause: stronger eSCS stimulation); corr=0.7 → 11; corr=0.6 → 3
+- **SUB_26_sess01**: 11/59 bad (all frontal: Fp1, Fz, Cz, F4, Fp2, AF7-AF8) → excluded from V8 batch
 
 ---
 
@@ -89,9 +131,63 @@ Early analysis hardcoded `target_goni_idx = 2`, assuming Walker Knee X. In reali
 
 ## 7. Online Reference Electrode
 
-| Population | Online REF | Ground |
-|------------|-----------|--------|
-| Healthy (A2Walk) | FCz | AFz |
-| Patient (RESTORE2) | Cz | AFz |
+| Population | Online REF | Ground | V8 Handling | Output |
+|------------|-----------|--------|-------------|--------|
+| Healthy (A2Walk) | FCz | AFz | FCz zero-filled + CAR | 60ch (59 brain + FCz) |
+| Patient (RESTORE2) | Cz | AFz | Cz zero-filled + CAR (updated 2026-04-13) | 60ch (59 brain + Cz) |
 
-Average re-referencing removes this difference downstream. However, bad REF (impedance > 20kΩ) corrupts all channels — see patient notes for affected sessions.
+Both pipelines now produce identical 60-channel montage: 59 brain channels + online ref zero-filled before CAR. The 59 brain channels differ by one: healthy includes Cz (data channel), excludes FCz (ref); patient includes FCz (data channel), excludes Cz (ref). After CAR, all 60 channels are valid.
+
+Bad REF (impedance > 20kΩ) corrupts all channels -- see patient notes for affected sessions.
+
+---
+
+## 8. V8 QC Results (2026-04-13, 40 healthy sessions)
+
+### ICLabel QC (pass: B70>=2, B80>=2, B90>=1)
+
+| Status | Count | Sessions |
+|--------|-------|----------|
+| PASS | 39 | All except SUB_19_sess02 |
+| **FAIL** | 1 | SUB_19_sess02 (B70=1, B80=1, B90=1) |
+
+### Flagged sessions (pass QC but need attention)
+
+| Session | BadCh | Issue |
+|---------|-------|-------|
+| SUB_04_sess02 | 11 | Exceeds 10-ch limit; scattered (frontal+central+temporal+occipital) |
+| SUB_19_sess01 | 7 | Marginal QC (B70=2, B80=2, B90=2) |
+| SUB_21_sess01 | 10 | At limit; widespread |
+| SUB_26_sess01 | 11 | Exceeds limit; all frontal strip |
+| SUB_28_sess01 | 3 | Only 20 MI / 20 Walk trials (recording interrupted) |
+| SUB_10_sess01 | 3 | Only 8 goni trials (second EEG segment has 68 trials) |
+
+---
+
+## 9. EEG--Goniometer Alignment
+
+See dedicated docs:
+- `healthy_data_prep.md` Section 4 -- IOI alignment, count mismatch, clock jump special cases
+- `patient_data_prep.md` Section 4 -- S10/Stim alignment, multi-file goni
+- `align_special_cases.md` -- SUB_07/27 clock jumps + SUB_12 file swap
+
+### Key findings (2026-04-13)
+
+- **40/40 healthy sessions aligned**, every trial independently trigger-matched
+- **9/9 patient sessions aligned** (P02_Sess04 added after goni upload to aa)
+- **Goni QC: 0 problems** across all 40 healthy sessions (condition-aware QC)
+- Clock jumps in SUB_07_sess02 (2 offsets, 244ms) and SUB_27_sess01 (3 offsets, 2673ms) are discrete, not drift. Each trial's goni cut is exact.
+- SUB_12_sess01 goni file swap fixed in raw data (aa + NTU OneDrive, 2026-04-13)
+- SUB_01_sess01 rest trials recovered via R1 marker co-occurrence
+- QC figures: `result/goni_healthy/qc/alignment_figs/` (40 PNGs, 3-panel: EEG timeline / Goni timeline / offset vs time)
+
+## 10. Data Sources and Sync
+
+| Source | Content | Sync status (2026-04-13) |
+|--------|---------|--------------------------|
+| NTU OneDrive | 28 healthy raw EEG+Goni | Canonical source; SUB_01-09 goni synced to aa |
+| aa server | 28 healthy + patient raw; V8 output; goni extraction | V8 40/40 complete; goni 40/40 complete |
+| Local (personal OneDrive) | Repo + goni results + flagged step2 | goni 40/40; 6 flagged step2.set downloaded |
+
+**SUB_01-09 goni raw data**: only on NTU OneDrive and (now) aa. Not in local repo.
+**V8 step1/2/3.set (32GB)**: only on aa. Epochs synced to local on demand.

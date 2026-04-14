@@ -56,6 +56,9 @@ jobs = {
     'Sub02_Sess03', 'Sub02', {
         fullfile(sub02_dir, 'sess03_02Mar2026-140612.038')
     }
+    'Sub02_Sess04', 'Sub02', {
+        fullfile(sub02_dir, 'RESTORE2_002_Sess04', 'sess04_06Apr2026-115201.751')
+    }
 };
 
 n_jobs = size(jobs, 1);

@@ -1,21 +1,21 @@
-function prep_healthy_v7(input_file, out_dir, max_step, out_label)
-%% prep_healthy_v7 — Healthy EEG preprocessing pipeline V7 (dual high-pass)
+function prep_healthy_v8(input_file, out_dir, max_step, out_label)
+%% prep_healthy_v8 — Healthy EEG preprocessing pipeline V7 (dual high-pass)
 %
-% Pipeline (V7, 2026-04-08):
+% Pipeline (V8, 2026-04-10):
 %   Step 1: Load → chanlocs → 59ch whitelist → Resample 250Hz
 %           → BP 1-40Hz → Trim S11-S12 → save step1_ica.set
 %           → BP 0.1-40Hz → Trim S11-S12 → save step1.set
-%   Step 2: (on step1_ica) Extract task+rest segments →
-%           Bad ch detection → Interpolate → Avg re-ref →
+%   Step 2: (on step1_ica) Extract task+rest segments (no BL) →
+%           Bad ch detection → Interpolate → FCz zero-fill → Avg re-ref →
 %           ASR(k=20, Walk only) → AMICA(1 model, 1000 iter)
 %           → save step2.set
-%   Step 3: Transfer ICA to step1.set (0.1Hz) → same bad ch interp + avgref
-%           → ICLabel → reject artifact>0.9 → save step3.set (0.1-40Hz)
-%   Step 4: Epoch by trial type → save epochs.mat
+%   Step 3: Transfer ICA to step1.set (0.1Hz) → same bad ch interp + FCz+avgref
+%           → ASR(k=20, Walk) → ICLabel → reject artifact>0.8 → save step3.set
+%   Step 4: Epoch by trial type → save epochs_ica.mat + epochs_bp.mat
 %
 % Usage:
-%   prep_healthy_v7('/path/to/recording.vhdr', '/path/to/output/')
-%   prep_healthy_v7('/path/to/recording.vhdr', '/out/', 4, 'SUB_01_sess01')
+%   prep_healthy_v8('/path/to/recording.vhdr', '/path/to/output/')
+%   prep_healthy_v8('/path/to/recording.vhdr', '/out/', 4, 'SUB_01_sess01')
 %
 % Trial definitions:
 %   MI (S1→S2), Walk (S4→S5), Rest (S7→S8)
@@ -42,13 +42,15 @@ trial_defs = {
 };
 n_trial_types = size(trial_defs, 1);
 
-% 59 standard brain channels (whitelist)
+% 59 standard brain channels (whitelist, excluding online reference FCz)
+% FCz is added back as zero-filled before CAR, becoming the 60th channel
 brain_whitelist = {'Fp1','Fz','F3','F7','FC5','FC1','C3','T7','CP5','CP1', ...
     'Pz','P3','P7','O1','Oz','O2','P4','P8','CP6','CP2', ...
     'Cz','C4','T8','FC6','FC2','F4','F8','Fp2', ...
     'AF7','AF3','AFz','F1','F5','FT7','FC3','C1','C5','TP7', ...
     'CP3','P1','P5','PO7','PO3','POz','PO4','PO8','P6','P2', ...
     'CPz','CP4','TP8','C6','C2','FC4','FT8','F6','AF8','AF4','F2'};
+brain_whitelist_full = [brain_whitelist, {'FCz'}];  % 60ch after CAR
 
 % Platform-aware EEGLAB path
 if ispc
@@ -78,11 +80,12 @@ file_step1_ica = fullfile(out_dir, [label '_step1_ica.set']);
 file_step1     = fullfile(out_dir, [label '_step1.set']);
 file_step2     = fullfile(out_dir, [label '_step2.set']);
 file_step3     = fullfile(out_dir, [label '_step3.set']);
-file_step4     = fullfile(out_dir, [label '_epochs.mat']);
+file_step4_bp  = fullfile(out_dir, [label '_epochs_bp.mat']);
+file_step4_ica = fullfile(out_dir, [label '_epochs_ica.mat']);
 
-% Early exit if final target exists
-if max_step >= 4 && exist(file_step4, 'file')
-    fprintf('  Already done: %s\n', file_step4); return;
+% Early exit if final targets exist
+if max_step >= 4 && exist(file_step4_bp, 'file') && exist(file_step4_ica, 'file')
+    fprintf('  Already done: %s, %s\n', file_step4_bp, file_step4_ica); return;
 elseif max_step == 3 && exist(file_step3, 'file')
     fprintf('  Already done: %s\n', file_step3); return;
 elseif max_step == 2 && exist(file_step2, 'file')
@@ -192,9 +195,8 @@ else
     n_bad        = sum(bad_mask);
     clear EEG_clean EEG_raw_seg;
 
-    if n_bad > 10
-        error('prep_healthy_v7:tooManyBadCh', ...
-            'Too many bad channels (%d/59, limit=10): %s', n_bad, strjoin(bad_labels, ', '));
+    if n_bad > 15
+        warning('prep_healthy_v8:manyBadCh', 'Many bad channels (%d/59): %s', n_bad, strjoin(bad_labels, ', '));
     elseif n_bad > 0
         fprintf('  Bad channels (%d): %s\n', n_bad, strjoin(bad_labels, ', '));
     else
@@ -203,7 +205,7 @@ else
     end
 
     % --- (b) Extract task+rest segments (with baseline correction) ---
-    [EEG_seg, trial_type_id, n_seg, total_dur] = extract_segments(EEG, trial_defs, srate);
+    [EEG_seg, trial_type_id, n_seg, total_dur] = extract_segments_no_bl(EEG, trial_defs, srate);
     clear EEG;
 
     % Remove bad channels from segment data
@@ -228,16 +230,36 @@ else
     EEG_seg = reorder_channels(EEG_seg, brain_whitelist);
 
     % --- (e) Average re-reference (AFTER bad ch interp, BEFORE ASR) ---
-    fprintf('  Average re-reference\n');
-    EEG_seg = pop_reref(EEG_seg, []);
+    % Restore online reference (FCz) as zero-filled channel before CAR
+    % This preserves data rank (Makoto's pipeline / Kim et al. 2023)
+    fprintf('  Adding zero-filled FCz (online reference)\n');
+    EEG_seg.nbchan = EEG_seg.nbchan + 1;
+    EEG_seg.data(end+1,:) = zeros(1, EEG_seg.pnts);
+    EEG_seg.chanlocs(end+1) = EEG_seg.chanlocs(end);  % placeholder
+    EEG_seg.chanlocs(end).labels = 'FCz';
+    % Assign FCz coordinates from standard montage
+    dipfit_dir_tmp = fileparts(which('pop_dipfit_settings'));
+    eloc_all = readlocs(fullfile(dipfit_dir_tmp, 'standard_BEM', 'elec', 'standard_1005.elc'));
+    fcz_match = find(strcmpi({eloc_all.labels}, 'FCz'), 1);
+    if ~isempty(fcz_match)
+        for fn = fieldnames(eloc_all)'
+            EEG_seg.chanlocs(end).(fn{1}) = eloc_all(fcz_match).(fn{1});
+        end
+    end
     EEG_seg = eeg_checkset(EEG_seg);
+    fprintf('  Average re-reference (with FCz, %d ch)\n', EEG_seg.nbchan);
+    EEG_seg = pop_reref(EEG_seg, []);
+    EEG_seg = reorder_channels(EEG_seg, brain_whitelist_full);  % 60ch with FCz
 
-    n_brain = EEG_seg.nbchan;
-    data_rank = n_brain - n_interp - 1;  % -1 for avgref rank loss
-    fprintf('  Data rank: %d (brain=%d, interp=%d)\n', data_rank, n_brain, n_interp);
+    n_brain = EEG_seg.nbchan;  % 60
+    formula_rank = n_brain - n_interp;  % No -1: FCz zero-fill absorbs avgref rank loss
+    numerical_rank = rank(double(EEG_seg.data'));
+    data_rank = min(formula_rank, numerical_rank);
+    fprintf('  Data rank: %d (formula=%d, numerical=%d, brain=%d, interp=%d)\n', ...
+        data_rank, formula_rank, numerical_rank, n_brain, n_interp);
 
     % --- (f) ASR on movement segments only (Walk) ---
-    [EEG_seg, n_asr] = apply_asr(EEG_seg, trial_defs, srate);
+    [EEG_seg, n_asr, asr_log] = apply_asr(EEG_seg, trial_defs, srate);
 
     % --- (g) AMICA ---
     fprintf('  AMICA: %d ch x %d pts, %d model(s), %d iter, rank %d\n', ...
@@ -267,6 +289,7 @@ else
     EEG_seg.etc.step2_meta.n_ch_interpolated = n_interp;
     EEG_seg.etc.step2_meta.data_rank         = data_rank;
     EEG_seg.etc.step2_meta.n_asr_segments    = n_asr;
+    EEG_seg.etc.step2_meta.asr_log           = asr_log;
     EEG_seg.etc.step2_meta.ica_method        = 'amica';
     EEG_seg.etc.step2_meta.amica_num_mod     = amica_num_mod;
     EEG_seg.etc.step2_meta.amica_max_iter    = amica_max_iter;
@@ -312,9 +335,28 @@ else
 
     EEG_out = reorder_channels(EEG_out, brain_whitelist);
 
-    fprintf('  Average re-reference (0.1Hz copy)\n');
-    EEG_out = pop_reref(EEG_out, []);
+    % Restore online reference (FCz) as zero-filled channel before CAR
+    fprintf('  Adding zero-filled FCz (online reference, 0.1Hz)\n');
+    EEG_out.nbchan = EEG_out.nbchan + 1;
+    EEG_out.data(end+1,:) = zeros(1, EEG_out.pnts);
+    EEG_out.chanlocs(end+1) = EEG_out.chanlocs(end);
+    EEG_out.chanlocs(end).labels = 'FCz';
+    dipfit_dir_tmp = fileparts(which('pop_dipfit_settings'));
+    eloc_all = readlocs(fullfile(dipfit_dir_tmp, 'standard_BEM', 'elec', 'standard_1005.elc'));
+    fcz_match = find(strcmpi({eloc_all.labels}, 'FCz'), 1);
+    if ~isempty(fcz_match)
+        for fn = fieldnames(eloc_all)'
+            EEG_out.chanlocs(end).(fn{1}) = eloc_all(fcz_match).(fn{1});
+        end
+    end
     EEG_out = eeg_checkset(EEG_out);
+    fprintf('  Average re-reference (with FCz, 0.1Hz, %d ch)\n', EEG_out.nbchan);
+    EEG_out = pop_reref(EEG_out, []);
+    EEG_out = reorder_channels(EEG_out, brain_whitelist_full);  % 60ch with FCz
+
+    % ASR on Walk segments (same k=20 as step2, removes non-stationary bursts)
+    fprintf('  ASR on 0.1Hz Walk segments (k=20)\n');
+    [EEG_out, n_asr_out, asr_log_out] = apply_asr(EEG_out, trial_defs, EEG_out.srate);
 
     % Transfer ICA weights from step2
     EEG_out.icaweights  = EEG_seg.icaweights;
@@ -328,7 +370,7 @@ else
     EEG_out = iclabel(EEG_out);
     ic_classes = EEG_out.etc.ic_classification.ICLabel.classifications;
 
-    artifact_thresh = 0.9;
+    artifact_thresh = 0.8;
     artifact_cols   = [2 3 4 5 6];  % Muscle, Eye, Heart, LineNoise, ChanNoise
     artifact_max    = max(ic_classes(:, artifact_cols), [], 2);
     rej_idx  = find(artifact_max > artifact_thresh);
@@ -349,9 +391,9 @@ else
         EEG_out = eeg_checkset(EEG_out);
     end
 
-    % Clear ICA fields (clean data, no ICA needed downstream)
-    EEG_out.icaweights = []; EEG_out.icasphere = [];
-    EEG_out.icawinv = []; EEG_out.icachansind = []; EEG_out.icaact = [];
+    % Preserve ICA weights for potential source analysis
+    EEG_out.etc.step3_meta.icaweights_pre_reject = EEG_seg.icaweights;
+    EEG_out.etc.step3_meta.icasphere_pre_reject = EEG_seg.icasphere;
     EEG_out = eeg_checkset(EEG_out);
 
     % Metadata
@@ -360,8 +402,10 @@ else
     EEG_out.etc.step3_meta.n_ics_rejected  = n_rej;
     EEG_out.etc.step3_meta.artifact_thresh = artifact_thresh;
     EEG_out.etc.step3_meta.step2_meta      = EEG_seg.etc.step2_meta;
+    EEG_out.etc.step3_meta.n_asr_segments_01hz = n_asr_out;
+    EEG_out.etc.step3_meta.asr_log_01hz        = asr_log_out;
     EEG_out.etc.step3_meta.pipeline = sprintf( ...
-        'V7: 59ch->250Hz->dualHP(1/0.1-40)->badch->interp->CAR->ASR(k=20)->AMICA(%dm,%di)->transfer->ICLabel(>0.9)', ...
+        'V8: 59ch->250Hz->dualHP(1/0.1-40)->badch->interp->+FCz->CAR(60ch)->ASR(k=20)->AMICA(%dm,%di)->transfer->ASR(k=20)->ICLabel(>0.8)', ...
         amica_num_mod, amica_max_iter);
 
     pop_saveset(EEG_out, 'filename', [label '_step3.set'], ...
@@ -373,29 +417,95 @@ clear EEG_seg;
 
 if max_step < 4, fprintf('\n=== %s step 3 done ===\n', label); return; end
 
-%% ========== STEP 4: Epoch by trial type → save .mat ==========
+%% ========== STEP 4: Epoch by trial type → save two .mat files ==========
 
-fprintf('\n--- Step 4: Epoch + Export ---\n');
+fprintf('\n--- Step 4: Epoch + Export (BP-only & ICA-cleaned) ---\n');
 
-evt_types = {EEG_out.event.type};
-evt_lats  = [EEG_out.event.latency];
 out_srate = EEG_out.srate;
 
-epochs = struct();
-epochs.srate    = out_srate;
-epochs.chanlocs = EEG_out.chanlocs;
-epochs.meta     = EEG_out.etc;
+% --- 4a: ICA-cleaned epochs (from step3) ---
+if ~exist(file_step4_ica, 'file')
+    epochs_ica = struct();
+    epochs_ica.srate    = out_srate;
+    epochs_ica.chanlocs = EEG_out.chanlocs;
+    epochs_ica.meta     = EEG_out.etc;
+    epochs_ica.type     = 'ica';
 
-for t = 1:n_trial_types
-    smk  = trial_defs{t, 1};
-    emk  = trial_defs{t, 2};
-    name = trial_defs{t, 3};
-    epochs.(name) = extract_epochs(EEG_out, smk, emk, out_srate);
-    fprintf('  %s: %d epochs\n', name, length(epochs.(name)));
+    for t = 1:n_trial_types
+        smk  = trial_defs{t, 1};
+        emk  = trial_defs{t, 2};
+        name = trial_defs{t, 3};
+        [epochs_ica.(name), epochs_ica.([name '_info'])] = extract_epochs(EEG_out, smk, emk, out_srate);
+        fprintf('  ICA %s: %d epochs\n', name, length(epochs_ica.(name)));
+    end
+
+    save(file_step4_ica, 'epochs_ica', '-v7.3');
+    fprintf('  Saved: %s\n', file_step4_ica);
+else
+    fprintf('  ICA epochs already exist: %s\n', file_step4_ica);
 end
 
-save(file_step4, 'epochs', '-v7.3');
-fprintf('  Saved: %s\n', file_step4);
+% --- 4b: BP-only epochs (from step1, 0.1-40Hz, no ICA) ---
+if ~exist(file_step4_bp, 'file')
+    % Load step1 (0.1Hz continuous, no ICA cleaning)
+    EEG_bp = pop_loadset('filename', [label '_step1.set'], 'filepath', out_dir);
+    EEG_bp = eeg_checkset(EEG_bp);
+
+    % Apply same bad ch interp + reorder + FCz+CAR as step3
+    % (so channel layout matches, only difference is no ICA)
+    bad_labels_bp = EEG_out.etc.step3_meta.step2_meta.bad_ch_labels;
+    brain_chanlocs_bp = EEG_out.etc.step3_meta.step2_meta.brain_chanlocs;
+
+    if ~isempty(bad_labels_bp)
+        keep_mask = ~ismember({EEG_bp.chanlocs.labels}, bad_labels_bp);
+        EEG_bp = pop_select(EEG_bp, 'channel', find(keep_mask));
+        EEG_bp = eeg_checkset(EEG_bp);
+        interp_mask = ismember({brain_chanlocs_bp.labels}, bad_labels_bp);
+        target_locs = [EEG_bp.chanlocs, brain_chanlocs_bp(interp_mask)];
+        EEG_bp = pop_interp(EEG_bp, target_locs, 'spherical');
+        EEG_bp = eeg_checkset(EEG_bp);
+        fprintf('  BP: interpolated %d bad ch\n', length(bad_labels_bp));
+    end
+
+    EEG_bp = reorder_channels(EEG_bp, brain_whitelist);
+
+    % FCz zero-fill + CAR (same as step3)
+    EEG_bp.nbchan = EEG_bp.nbchan + 1;
+    EEG_bp.data(end+1,:) = zeros(1, EEG_bp.pnts);
+    EEG_bp.chanlocs(end+1) = EEG_bp.chanlocs(end);
+    EEG_bp.chanlocs(end).labels = 'FCz';
+    dipfit_dir_tmp = fileparts(which('pop_dipfit_settings'));
+    eloc_all = readlocs(fullfile(dipfit_dir_tmp, 'standard_BEM', 'elec', 'standard_1005.elc'));
+    fcz_match = find(strcmpi({eloc_all.labels}, 'FCz'), 1);
+    if ~isempty(fcz_match)
+        for fn = fieldnames(eloc_all)'
+            EEG_bp.chanlocs(end).(fn{1}) = eloc_all(fcz_match).(fn{1});
+        end
+    end
+    EEG_bp = eeg_checkset(EEG_bp);
+    EEG_bp = pop_reref(EEG_bp, []);
+    EEG_bp = reorder_channels(EEG_bp, brain_whitelist_full);  % 60ch with FCz
+
+    epochs_bp = struct();
+    epochs_bp.srate    = EEG_bp.srate;
+    epochs_bp.chanlocs = EEG_bp.chanlocs;
+    epochs_bp.meta     = EEG_bp.etc;
+    epochs_bp.type     = 'bp';
+
+    for t = 1:n_trial_types
+        smk  = trial_defs{t, 1};
+        emk  = trial_defs{t, 2};
+        name = trial_defs{t, 3};
+        [epochs_bp.(name), epochs_bp.([name '_info'])] = extract_epochs(EEG_bp, smk, emk, EEG_bp.srate);
+        fprintf('  BP %s: %d epochs\n', name, length(epochs_bp.(name)));
+    end
+
+    save(file_step4_bp, 'epochs_bp', '-v7.3');
+    fprintf('  Saved: %s\n', file_step4_bp);
+    clear EEG_bp;
+else
+    fprintf('  BP epochs already exist: %s\n', file_step4_bp);
+end
 
 fprintf('\n=== %s done! ===\n', label);
 end
@@ -436,6 +546,10 @@ function [EEG_seg, trial_type_id, n_seg, total_dur] = extract_segments(EEG, tria
     evt_types = {EEG.event.type};
     evt_lats  = [EEG.event.latency];
 
+    % Boundary event latencies (file joins / rejected regions)
+    boundary_lats = evt_lats(strcmp(evt_types, 'boundary'));
+    n_boundary_skip = 0;
+
     for td = 1:n_trial_types
         smk = trial_defs{td, 1};
         emk = trial_defs{td, 2};
@@ -461,6 +575,14 @@ function [EEG_seg, trial_type_id, n_seg, total_dur] = extract_segments(EEG, tria
             dur = (nxt - sl) / srate;
             if dur < 3 || dur > 300, continue; end
 
+            % Reject segments spanning a boundary event (file join / data break)
+            if any(boundary_lats > sl & boundary_lats < nxt)
+                fprintf('  SKIP %s #%d: spans boundary event (%.1f–%.1f s)\n', ...
+                    trial_defs{td, 3}, i, sl/srate, nxt/srate);
+                n_boundary_skip = n_boundary_skip + 1;
+                continue;
+            end
+
             i1 = max(1, round(sl));
             i2 = min(EEG.pnts, round(nxt));
             t_start = (i1 - 1) / srate;
@@ -476,10 +598,13 @@ function [EEG_seg, trial_type_id, n_seg, total_dur] = extract_segments(EEG, tria
         end
         fprintf('  %s: %d trials\n', trial_defs{td, 3}, n_this);
     end
+    if n_boundary_skip > 0
+        fprintf('  WARNING: %d segments skipped (boundary crossing)\n', n_boundary_skip);
+    end
     fprintf('  Total: %d segments, %.1f s (%.1f min)\n', n_seg, total_dur, total_dur/60);
 
     if n_seg == 0
-        error('prep_healthy_v7:noSegments', 'No valid trial segments found.');
+        error('prep_healthy_v8:noSegments', 'No valid trial segments found.');
     end
 
     % Baseline correction on continuous data
@@ -521,6 +646,7 @@ function [EEG_seg, trial_type_id, n_seg, total_dur] = extract_segments_no_bl(EEG
 
     evt_types = {EEG.event.type};
     evt_lats  = [EEG.event.latency];
+    boundary_lats = evt_lats(strcmp(evt_types, 'boundary'));
 
     for td = 1:n_trial_types
         smk = trial_defs{td, 1};
@@ -546,6 +672,7 @@ function [EEG_seg, trial_type_id, n_seg, total_dur] = extract_segments_no_bl(EEG
             end
             dur = (nxt - sl) / srate;
             if dur < 3 || dur > 300, continue; end
+            if any(boundary_lats > sl & boundary_lats < nxt), continue; end
 
             i1 = max(1, round(sl));
             i2 = min(EEG.pnts, round(nxt));
@@ -589,16 +716,23 @@ function EEG = reorder_channels(EEG, whitelist)
         EEG = eeg_checkset(EEG);
         fprintf('  Reordered %d channels\n', EEG.nbchan);
     else
-        fprintf('  WARNING: channel mismatch (%d vs %d), skipping reorder\n', ...
-            length(reorder_idx), EEG.nbchan);
+        missing = whitelist(~ismember(whitelist, cur_labels));
+        extra   = cur_labels(~ismember(cur_labels, whitelist));
+        error('reorder_channels:mismatch', ...
+            'Channel mismatch (%d matched vs %d expected). Missing: {%s}. Extra: {%s}', ...
+            length(reorder_idx), EEG.nbchan, strjoin(missing, ', '), strjoin(extra, ', '));
     end
 end
 
-function [EEG_seg, n_asr] = apply_asr(EEG_seg, trial_defs, srate)
+function [EEG_seg, n_asr, asr_log] = apply_asr(EEG_seg, trial_defs, srate)
     n_trial_types = size(trial_defs, 1);
     evt_types = {EEG_seg.event.type};
     evt_lats  = [EEG_seg.event.latency];
     n_asr = 0;
+    asr_log = struct('type', {}, 'index', {}, 'dur_sec', {}, 'status', {}, 'error_msg', {});
+
+    % Boundary event latencies (consistent with extract_segments/extract_epochs)
+    boundary_lats = evt_lats(strcmp(evt_types, 'boundary'));
 
     for td = 1:n_trial_types
         if ~trial_defs{td, 4}, continue; end
@@ -618,6 +752,8 @@ function [EEG_seg, n_asr] = apply_asr(EEG_seg, trial_defs, srate)
                 nxt = e_lats(e_lats > sl);
                 if isempty(nxt), continue; end
                 nxt = nxt(1);
+                % Skip if nested start marker before end (consistent with extract_segments)
+                if any(s_lats > sl & s_lats < nxt), continue; end
             else
                 nxt = e_lats(i);
                 if round(nxt) > EEG_seg.pnts, continue; end
@@ -625,7 +761,14 @@ function [EEG_seg, n_asr] = apply_asr(EEG_seg, trial_defs, srate)
             i1 = max(1, round(sl));
             i2 = min(EEG_seg.pnts, round(nxt));
             dur = (i2 - i1) / srate;
-            if dur < 3, continue; end
+            if dur < 3 || dur > 300, continue; end
+
+            % Skip segments spanning boundary events (consistent with extract_segments)
+            if any(boundary_lats > sl & boundary_lats < nxt)
+                fprintf('  ASR SKIP %s #%d: spans boundary (%.1f–%.1f s)\n', ...
+                    trial_defs{td, 3}, i, sl/srate, nxt/srate);
+                continue;
+            end
 
             seg_data = EEG_seg.data(:, i1:i2);
             EEG_tmp = eeg_emptyset();
@@ -644,17 +787,26 @@ function [EEG_seg, n_asr] = apply_asr(EEG_seg, trial_defs, srate)
                 EEG_seg.data(:, i1:i2) = EEG_tmp.data;
                 n_asr = n_asr + 1;
                 fprintf('  ASR %s #%d: %.1f s\n', trial_defs{td, 3}, i, dur);
+                asr_log(end+1) = struct('type', trial_defs{td, 3}, 'index', i, ...
+                    'dur_sec', dur, 'status', 'ok', 'error_msg', '');
             catch ME_asr
-                fprintf('  ASR SKIP (%.1f s): %s\n', dur, ME_asr.message);
+                fprintf('  ASR SKIP %s #%d (%.1f s): %s\n', trial_defs{td, 3}, i, dur, ME_asr.message);
+                asr_log(end+1) = struct('type', trial_defs{td, 3}, 'index', i, ...
+                    'dur_sec', dur, 'status', 'skip', 'error_msg', ME_asr.message);
             end
         end
     end
-    fprintf('  ASR total: %d segments (k=20)\n', n_asr);
+    n_skip = sum(strcmp({asr_log.status}, 'skip'));
+    if n_asr == 0 && n_skip == 0
+        warning('apply_asr:noSegments', 'No ASR target segments found. Check Walk markers.');
+    end
+    fprintf('  ASR total: %d cleaned, %d skipped (k=20)\n', n_asr, n_skip);
 end
 
-function trials = extract_epochs(EEG, smk, emk, srate)
+function [trials, info] = extract_epochs(EEG, smk, emk, srate)
     evt_types = {EEG.event.type};
     evt_lats  = [EEG.event.latency];
+    boundary_lats = evt_lats(strcmp(evt_types, 'boundary'));
     s_lats = evt_lats(strcmp(evt_types, smk));
     if ischar(emk)
         e_lats = evt_lats(strcmp(evt_types, emk));
@@ -662,6 +814,7 @@ function trials = extract_epochs(EEG, smk, emk, srate)
         e_lats = s_lats + emk * srate;
     end
     trials = {};
+    info = struct('trial_idx', {}, 'start_lat', {}, 'end_lat', {}, 'dur_sec', {});
     for i = 1:length(s_lats)
         sl = s_lats(i);
         if ischar(emk)
@@ -677,6 +830,8 @@ function trials = extract_epochs(EEG, smk, emk, srate)
         i2 = min(EEG.pnts, round(nxt));
         dur = (i2 - i1) / srate;
         if dur < 3 || dur > 300, continue; end
+        if any(boundary_lats > sl & boundary_lats < nxt), continue; end
         trials{end+1} = EEG.data(:, i1:i2); %#ok<AGROW>
+        info(end+1) = struct('trial_idx', i, 'start_lat', sl, 'end_lat', nxt, 'dur_sec', dur);
     end
 end
