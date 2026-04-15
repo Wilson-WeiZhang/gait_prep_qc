@@ -38,7 +38,7 @@ S10 → S11 → [S4→S5]×5 → [S1→S2]×N → [S7→S8] → [S1→S2]×N →
 |-----------|-------|
 | Amplifier | actiCHamp Plus (Brain Products) |
 | Channels | 63 (10-20 extended montage) |
-| Online reference | **FCz** (same as healthy; vhdr labels it "REF" but Phys.Ch.64 = FCz position, Cz recorded as normal Ch24) |
+| Online reference | **Cz** (differs from healthy FCz; vhdr labels it "REF", physical position = Cz. FCz recorded as normal data channel) |
 | Ground | AFz |
 | Sampling rate | 1000 Hz |
 | Format | BrainVision (.vhdr / .vmrk / .eeg) |
@@ -130,9 +130,9 @@ Patient data has **periodic S10 sync pulses** (~83--144 per session), providing 
 | Sub01_Sess02 | 3 EEG files, 1 goni file | EEG files merged first, then single alignment |
 | Sub01_Sess04 | 2 EEG files, 1 goni file (with gap) | Aligned per-file; F1 has 82/83 match, F2 has 83/83 |
 
-### Alignment Quality (All 10 Patient Sessions)
+### Alignment Quality (All 9 Patient Sessions, 11 alignments)
 
-All sessions 100% matched. No clock drift issues (shorter sessions than healthy, ~20--45 min vs ~57 min).
+All sessions 100% matched. No clock drift issues (shorter sessions than healthy, ~20--45 min vs ~57 min). Sub01_Sess03 and Sess04 each have 2 alignments (multi-file goni).
 
 | Session | S10 | Stim | Matched | Max err | Notes |
 |---------|-----|------|---------|---------|-------|
@@ -290,7 +290,7 @@ No goniometer alignment needed.
 | Sess01 | Sub02 | 05 Jan 2026 | 1 | ~29 | OFF | Bad REF |
 | Sess02 | Sub02 | 29 Jan 2026 | 1 | ~39 | ON | Bad REF |
 | Sess03 | Sub02 | 02 Mar 2026 | 1 | ~44 | ON | No S12; 1 spurious goni stim |
-| Sess04 | Sub02 | 06 Apr 2026 | 1 | — | ON (stronger) | 33/59 bad ch at corr=0.8; goni data present but not yet extracted |
+| Sess04 | Sub02 | 06 Apr 2026 | 1 | 47 MI + 50 S2S | ON (stronger) | 33/59 bad ch at corr=0.8; goni aligned (161/161 matched, 22ms max err) |
 
 ### Excluded from Analysis
 

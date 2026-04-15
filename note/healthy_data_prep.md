@@ -2,7 +2,7 @@
 
 ## 1. Study Design
 
-26 healthy subjects (SUB_01–SUB_26), each paired with a Walker. Each session = **30 cycles x 5 trials = 150 trials**, ~57 min recording.
+28 healthy subjects (SUB_01–SUB_28), each paired with a Walker. Each session = **30 cycles x 5 trials = 150 trials**, ~57 min recording.
 
 ### Cycle Structure (always in this order)
 
@@ -149,16 +149,22 @@ When EEG and goni trigger counts differ by N:
 
 Examples: SUB_01_sess01 (303 vs 303, old script, resolved by IOI sliding), Sub02_Sess03 patient (145 vs 144, 1 spurious goni stim at recording end removed).
 
-### Alignment Quality (37 sessions)
+### Alignment Quality (40 sessions)
 
 | Category | Sessions | Match | Max residual |
 |----------|----------|-------|-------------|
-| Perfect | 35/37 | 100% | < 50ms |
-| Clock drift (per-segment offset) | SUB_07_sess02, SUB_27_sess01 | 100% after fix | < 31ms |
+| Perfect (single offset) | 36/40 | 100% | < 50ms |
+| Clock drift (per-segment offset) | SUB_07_sess02, SUB_19_sess02, SUB_27_sess01 | 100% after fix | < 31ms |
+| Late goni start | SUB_16_sess02 | 91% (274/301); all trials in matched region | < 40ms |
+| Partial goni coverage | SUB_10_sess01 | 41/~302 matched; only 8 GI trials | Excluded from primary analysis |
 
-### Clock Drift Special Cases
+See `align_special_cases.md` for full diagnostic details on all 4 special cases.
 
-Two sessions have gradual clock drift between EEG and goni systems. Joint angle data is fully continuous (no disconnection, no zeros). The standard single offset fails because cumulative drift exceeds the 100ms tolerance.
+### Clock Drift & Alignment Special Cases
+
+Four sessions require special handling. See `align_special_cases.md` for full diagnostics.
+
+**Clock drift** (3 sessions): gradual clock drift between EEG and goni systems. Joint angle data is fully continuous (no disconnection, no zeros). The standard single offset fails because cumulative drift exceeds the 100ms tolerance.
 
 **Fix**: `extract_goni_all_healthy.m` applies per-segment offsets for these sessions via `get_special_offsets()`. Each trial's EEG time determines which offset to use.
 
@@ -182,6 +188,24 @@ Initial clock mismatch of 2.4s that resolves after ~260s, plus late drift of +0.
 | >= 1695s | -9.167 | Late drift |
 
 See `align_special_cases.md` for full diagnostic details.
+
+#### SUB_19_sess02
+
+Clock drift with 3 phases (~183ms total over ~2800s). Per-segment offsets:
+
+| EEG time range | Offset (s) | Note |
+|---------------|------------|------|
+| < 610s | 28.258 | Goni clock behind |
+| 610–2090s | 28.370 | Near baseline |
+| >= 2090s | 28.441 | Goni clock ahead |
+
+#### SUB_16_sess02 — Late Goni Start
+
+Goni recording started ~4.5 min after EEG. First 27 EEG events have no goni counterpart. From event 29 onward: perfect alignment (mean 10ms, max 40ms). All 60/60/30 trials extracted from matched region. No code change needed.
+
+#### SUB_10_sess01 — Partial Goni Coverage
+
+Multi-file session. Goni only captured 41 out of ~302 EEG events. Only 8 GI trials with goni data. Excluded from primary CCA/decoding analysis.
 
 ### Validation
 
@@ -291,8 +315,9 @@ task_id, task_name, marker_start, marker_end, t_start_unix_ms, t_end_unix_ms, du
 |---------|----------|-------------|-------|
 | SUB_04 sess02 | 2 | 15 + 46 | |
 | SUB_09 sess02 | 2 | 6 + 56 | |
-| SUB_10 sess01 | 2 | 8 + ? | |
+| SUB_10 sess01 | 2 | 8 + ? | Goni only captured 41 events; partial coverage |
 | **SUB_22 sess01** | **3** | 78 + 3 + 70 | Goni wireless disconnection → mid-session restart; segment 2 has no S11 → visual alignment by Neethu |
+| **SUB_28 sess01** | 1 | **20 MI + 20 Walk** | Recording interrupted early; only ~40 trials total |
 
 ### Goniometer Data Quality (Wireless Disconnection → Zeros)
 
@@ -320,7 +345,7 @@ Walk condition has high trial-level variability (CV 0.15–0.80) because Walker 
 | SUB_17 sess01 | 5 | Fz,F3,F4,Fp2,F5 | Frontal channels |
 | SUB_01 sess01 | 5 | T7,O2,T8,C5,PO8 | Temporal-occipital |
 
-**Most common bad channel**: Fp2 (20/30 sessions) — typical frontal electrode contact issue.
+**Most common bad channel**: Fp2 (20/40 sessions) — typical frontal electrode contact issue.
 
 ### ICLabel Brain IC Outliers
 
@@ -333,14 +358,26 @@ QC threshold: brain>70% ≥2, brain>80% ≥2, brain>90% ≥1
 | **SUB_11 sess01** | **2** | **2** | **1** | All thresholds at minimum |
 | **SUB_19 sess01** | **2** | **2** | **2** | All thresholds at minimum; also 7 bad ch |
 
-All sessions pass QC criteria, but SUB_07/11/19 are borderline — flag for extra scrutiny in downstream analysis.
+**SUB_19_sess02**: **FAIL** QC (B70=1, B80=1, B90=1). Excluded from analysis.
+
+All other sessions pass QC criteria, but SUB_07/11/19_sess01 are borderline — flag for extra scrutiny in downstream analysis.
 
 ### Other Exceptions
 
 | Session | Issue |
 |---------|-------|
 | **SUB_24 sess01** | Only mixed-gender pair (female subject, male walker) |
+| **SUB_25 sess01** | Female subject (with SUB_26) |
+| **SUB_26 sess01** | Female subject (with SUB_25); 11 bad channels (frontal strip) |
 | **SUB_01 sess01** | IOI alignment needed special sliding match (192s residual with naive 1:1 mapping) |
+
+### V8 QC Summary (40 sessions)
+
+| Status | Count | Details |
+|--------|-------|---------|
+| **PASS** | 39 | All except SUB_19_sess02 |
+| **FAIL** | 1 | SUB_19_sess02 (ICLabel B70=1, B80=1, B90=1) |
+| **Flagged** | 6 | SUB_04_sess02 (11 bad ch), SUB_10_sess01 (partial goni), SUB_19_sess01 (borderline QC), SUB_21_sess01 (10 bad ch + goni), SUB_26_sess01 (11 bad ch), SUB_28_sess01 (20 MI/20 Walk only) |
 
 ---
 

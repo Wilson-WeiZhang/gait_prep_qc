@@ -112,7 +112,7 @@ Applying baseline correction **before** `clean_rawdata` destroys inter-channel s
 - 0.8 = field default (Jacobsen 2021, most gait EEG studies)
 - Pipeline V8: upper limit = 10/59 bad channels; error-exit if exceeded
 - **P02_Sess04 anomaly**: corr=0.8 → 33 bad (root cause: stronger eSCS stimulation); corr=0.7 → 11; corr=0.6 → 3
-- **SUB_26_sess01**: 11/59 bad (all frontal: Fp1, Fz, Cz, F4, Fp2, AF7-AF8) → excluded from V8 batch
+- **SUB_26_sess01**: 11/59 bad (all frontal: Fp1, Fz, Cz, F4, Fp2, AF7-AF8) → processed with warning (exceeds 10-ch limit)
 
 ---
 

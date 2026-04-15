@@ -1,7 +1,7 @@
 # Alignment Special Cases (Healthy)
 
 Out of 40 healthy sessions, 36 align perfectly (100% match, single offset, residual < 50ms).
-Three sessions require **per-segment offset** due to clock drift. One session has late goni start.
+Three sessions require **per-segment offset** due to clock drift. One session has late goni start. One session has partial goni coverage.
 
 ## SUB_12_sess01 -- Goni Files Swapped (fixed 2026-04-13)
 
