@@ -40,6 +40,11 @@ gait_prep_qc/
 │   ├── report_v8_summary.m    # V8 QC report (bad ch, ICLabel brain ICs)
 │   ├── run_full_pipeline.m    # End-to-end pipeline orchestrator
 │   ├── run_prep_v8.m          # Batch V8 runner for single-file sessions
+│   ├── plot_ic_topo.m         # IC scalp topoplots (top 20, step2.set, ICLabel on-the-fly)
+│   ├── plot_goni_qc.m         # Goni QC plots (3x2 grid, Walker/Subject channels)
+│   ├── plot_alignment_qc.m    # EEG-Goni alignment QC figures (healthy + patient)
+│   ├── generate_qc_report.m   # QC summary table (XLSX+CSV, 49 sessions)
+│   ├── run_qc_report.m        # Master runner for all QC reports
 │   ├── special_offsets/        # Per-session clock drift corrections
 │   │   ├── SUB_07_sess02.m    # 2 segments, drift 0.244s
 │   │   ├── SUB_16_sess02.m    # 2 segments, drift 8.01s
@@ -61,10 +66,17 @@ gait_prep_qc/
 │   └── align_special_cases.md  # Clock drift + SUB_12 file swap + SUB_10 diagnostics
 │
 └── result/
+    ├── qc_report.xlsx          # Master QC table (49 sessions, PASS/WARN/FAIL/EXCLUDED)
+    ├── qc_report.csv           # CSV fallback
+    ├── qc_figs/
+    │   ├── ic_topo/            # IC scalp topoplots (49 PNGs, top 20 ICs each)
+    │   └── goni_qc/            # Goni joint angle QC plots (49 PNGs)
     └── goni_healthy/           # All goni .mat files (healthy + patient)
         ├── SUB_01_sess01_goni.mat ... SUB_28_sess01_goni.mat  (40 healthy)
         ├── P01_Sess01_goni.mat ... P02_Sess04_goni.mat        (9 patient)
-        └── qc/                 # Alignment QC tables
+        └── qc/
+            ├── alignment_figs/ # EEG-Goni alignment QC figures (49 PNGs)
+            └── align_qc_*.txt  # Per-segment alignment error tables
 ```
 
 ## EEG V8 Pipeline (prep_healthy_v8.m)
@@ -101,6 +113,32 @@ EEG and Goni receive same TTL triggers. The inter-onset-interval (IOI) sequence 
 ### Patient: S10 Stim Matching (align_eeg_goni.m)
 
 S10 periodic sync triggers in EEG matched to Stim rising edges in Goni.
+
+## QC Report Pipeline (run_qc_report.m)
+
+Single command generates all QC visualizations + summary table:
+
+```bash
+cd ~/gait/gait_prep_qc/code && matlab -batch "run_qc_report"
+```
+
+| Step | Script | Output | Description |
+|------|--------|--------|-------------|
+| 1 | `plot_ic_topo.m` | `result/qc_figs/ic_topo/*.png` | Top 20 IC scalp maps from step2.set, ICLabel on-the-fly |
+| 2 | `plot_goni_qc.m` | `result/qc_figs/goni_qc/*.png` | Joint angle traces (Hip/Knee/Ankle × MI/Walk), QC color-coded |
+| 3 | `plot_alignment_qc.m` | `result/goni_healthy/qc/alignment_figs/*.png` | EEG-Goni trigger alignment residuals, segment-aware |
+| 4 | `generate_qc_report.m` | `result/qc_report.xlsx` + `.csv` | 49-row summary: bad ch, ICs, ICLabel, goni trials, alignment, verdict |
+
+**QC Verdict rules:**
+- **EXCLUDED**: P01_Sess03/04, P02_Sess01/02 (bad REF, intentionally stopped at step2)
+- **FAIL**: no step2.set, or >15 bad channels
+- **WARN**: step2-only (non-excluded), >8 bad channels, >3 goni problems, >30ms alignment error
+- **PASS**: everything else
+
+**Design notes:**
+- IC topoplots use step2.set (not step3) because step2 is the common denominator for all 49 sessions
+- Patient goni.mat has different field names from healthy; scripts normalize inline
+- Both healthy and patient sessions handled in all 4 scripts
 
 ## Known Outliers and Special Cases
 
